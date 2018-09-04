@@ -1,7 +1,7 @@
 import abc, json, math, re, statistics
-from util import p2f, sigmoid
+from util import p2f, sigmoid, geometric_mean
 from web_provider import WebProvider
-
+import score
 
 class Stock:
     def __init__(self):
@@ -20,7 +20,11 @@ class YahooStock:
         self.symbol=quote_summary['symbol']
         self.price=quote_summary['price']['regularMarketPrice']['raw']
         self.shares_outstanding = quote_summary['defaultKeyStatistics']['sharesOutstanding']['raw']
-        self.five_year_avg_dividend_yield=quote_summary['summaryDetail']['fiveYearAvgDividendYield']['raw']/100.0
+        try:
+            self.five_year_avg_dividend_yield=quote_summary['summaryDetail']['fiveYearAvgDividendYield']['raw']/100.0
+        except KeyError:
+            self.five_year_avg_dividend_yield=None
+
         self.forward_dividend_yield=p2f(quote_summary['summaryDetail']['dividendYield']['fmt'])
         self.forward_dividend_rate = quote_summary['summaryDetail']['dividendRate']['raw']
 
@@ -43,53 +47,68 @@ class YahooStock:
         except KeyError:
             self.free_cashflow = None
 
-        self.target_mean_price = quote_summary['financialData']['targetMeanPrice']['raw']
-        self.recommendation_mean = quote_summary['financialData']['recommendationMean']['raw']
+        try:
+            self.target_mean_price = quote_summary['financialData']['targetMeanPrice']['raw']
+        except KeyError:
+            self.target_mean_price = None
 
-    def dividend_payout_ratio_rev(self):
-        return 1.0/self.dividend_payout_ratio
-
-    def dividend_cashflow_ratio_rev(self):
-        return (self.free_cashflow/self.shares_outstanding)/self.forward_dividend_rate if self.free_cashflow is not None else None
+        try:
+            self.recommendation_mean = quote_summary['financialData']['recommendationMean']['raw']
+        except KeyError:
+            self.recommendation_mean = None
 
     def target_price_score(self):
-        return sigmoid(-math.log2(self.price/self.target_mean_price)*4)*100
-
-    def target_pe_score(self):
-        return sigmoid(-math.log2(self.forward_pe/25.0)*2)*100
-
-    def dividend_score(self):
-        return sigmoid(math.log2(self.forward_dividend_yield/self.five_year_avg_dividend_yield)*2)*100
-
-    def dividend_payout_score(self):
         try:
-            #return max(min(100 + 100 * ((0.55 - self.dividend_payout_ratio) / 0.3), 100), 0) if self.dividend_payout_ratio is not None else 0
-            return sigmoid(self.dividend_payout_ratio_rev())*100
+            return score.target_price_score(
+                price=self.price,
+                target_price=self.target_mean_price
+            )
         except:
             return 0
 
-    def dividend_cashflow_payout_score(self):
-        #return max(min(100 + 100 * ((0.55 - self.dividend_cashflow_ratio()) / 0.3), 100), 0)
-        return sigmoid(self.dividend_cashflow_ratio_rev())*100 if self.dividend_cashflow_ratio_rev() is not None else 0
+    def target_pe_score(self):
+        return score.pe_score(pe=self.forward_pe)
+
+    def dividend_score(self):
+        try:
+            return score.dividend_score(
+                dividend_yield=self.forward_dividend_yield,
+                mean_dividend_yield=self.five_year_avg_dividend_yield
+            )
+        except:
+            return 0
+
+    def dividend_payout_score(self):
+        try:
+            return geometric_mean([
+                score.dividend_payout_score(self.dividend_payout_ratio),
+                score.dividend_payout_score(self.forward_dividend_rate / (self.free_cashflow / self.shares_outstanding))
+            ])
+        except:
+            return 0
 
     def median_analyst_score(self):
-        return max(min(125 - self.recommendation_mean * 25, 100), 0)
+        try:
+            return max(min(125 - self.recommendation_mean * 25, 100), 0)
+        except:
+            return 0
 
     def growth_score(self):
-        scores=[
-            self._growth_score(self.earnings_growth),
-            self._growth_score(self.revenue_growth),
-        ]
-        return statistics.mean([x for x in scores if x is not None])
+        def _scores():
+            if self.earnings_growth is not None:
+                yield score.growth_score(self.earnings_growth)
+            if self.revenue_growth is not None:
+                yield score.growth_score(self.revenue_growth)
+
+        return statistics.mean(_scores())
 
     def total_score(self):
-        return statistics.mean([
+        return geometric_mean([
             self.target_price_score(),
             self.target_pe_score(),
             self.growth_score(),
             self.dividend_score(),
             self.dividend_payout_score(),
-            self.dividend_cashflow_payout_score(),
             self.median_analyst_score(),
         ])
 
